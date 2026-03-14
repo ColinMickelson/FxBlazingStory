@@ -1,0 +1,760 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Foxen · Delivery System Architecture</title>
+  <link href="https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet" />
+  <script src="https://unpkg.com/react@18/umd/react.development.js" crossorigin></script>
+  <script src="https://unpkg.com/react-dom@18/umd/react-dom.development.js" crossorigin></script>
+  <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+    body { background: #0f1117; }
+  </style>
+</head>
+<body>
+  <div id="root"></div>
+
+  <script type="text/babel">
+    const { useState, useEffect } = React;
+
+    const LAYERS = {
+      design: {
+        id: "design",
+        label: "Design System Layer",
+        color: "#E8725A",
+        bgLight: "rgba(232,114,90,0.06)",
+        items: [
+          {
+            id: "figma",
+            label: "Figma",
+            detail: "Variables / tokens (DTCG-aligned)\nComponent properties & variants\nModes: light/dark, density, brand\nREST API + plugin export",
+            status: "stable",
+            risk: null,
+          },
+        ],
+      },
+      platform: {
+        id: "platform",
+        label: "Front-end Platform Layer",
+        color: "#3B82C4",
+        bgLight: "rgba(59,130,196,0.06)",
+        items: [
+          {
+            id: "tokens",
+            label: "Token Mapping",
+            detail: "Figma → Style Dictionary → CSS vars\n–fx- prefix enforced via CI linter\nMode files: tokens-light.css, tokens-dark.css\nVersioned independently from apps",
+            status: "new",
+            risk: "medium",
+            riskNote: "Figma native export rollout uneven — use REST API + plugin fallback",
+          },
+          {
+            id: "rcl",
+            label: "Foxen.Ui (RCL)",
+            detail: "MudBlazor v8 · .NET 8+ · Render-mode-agnostic\n\nFoundation: CSS vars, theme, icons, typography, layout\nComponents: accessible MudBlazor wrappers\nPatterns: page frames, grid shells, wizards\n\nAll DI via interfaces — no server-only assumptions",
+            status: "core",
+            risk: null,
+          },
+          {
+            id: "stories",
+            label: "BlazingStory",
+            detail: "v1.0.0-preview.48 · Solo maintainer\nPortable .stories.razor convention\nMCP server for AI agents\nNo hot reload · No addon system\n\nFallback: standalone ASP.NET Core app",
+            status: "risk",
+            risk: "high",
+            riskNote: "Hobby project with explicit abandonment warning — keep stories portable",
+          },
+          {
+            id: "tests",
+            label: "Quality Gates",
+            detail: "bUnit: markup + behavior (Phase 1)\naxe-core via Playwright: a11y (Phase 2)\nPlaywright visual regression (Phase 3+)\nToken naming linter (Phase 1)\nAPI contract checks",
+            status: "stable",
+            risk: null,
+          },
+        ],
+      },
+      apps: {
+        id: "apps",
+        label: "Application Consumption Layer",
+        color: "#22A06B",
+        bgLight: "rgba(34,160,107,0.06)",
+        items: [
+          {
+            id: "rp",
+            label: "Resident Portal",
+            detail: "Blazor Web App · Interactive Server\n.NET 8 → .NET 10\n+ ResidentPortal.UiAdapters",
+            status: "stable",
+            risk: null,
+          },
+          {
+            id: "fd",
+            label: "FoxDen",
+            detail: "Blazor Web App · Interactive Server\n.NET 8 → .NET 10\n+ FoxDen.UiAdapters",
+            status: "stable",
+            risk: null,
+          },
+          {
+            id: "pmp",
+            label: "Admin / PMP",
+            detail: "Blazor WebAssembly (standalone)\n.NET 8 → .NET 10 · Planned consumer\n+ AdminPmp.UiAdapters\n\n⚠ Render-mode-agnostic compliance required",
+            status: "planned",
+            risk: "medium",
+            riskNote: "WASM consumer may break shared components with server-only assumptions",
+          },
+        ],
+      },
+      delivery: {
+        id: "delivery",
+        label: "Delivery & Governance",
+        color: "#8B6FC0",
+        bgLight: "rgba(139,111,192,0.06)",
+        items: [
+          {
+            id: "ci",
+            label: "CI/CD Pipeline",
+            detail: "Token build (Style Dictionary, Node isolated)\nPackage build (.NET)\nSemantic versioning\nStory site publish\nVisual regression baseline",
+            status: "stable",
+            risk: null,
+          },
+          {
+            id: "rules",
+            label: "Adoption Rules",
+            detail: "1. Use shared primitives first\n2. App-specific wrappers second\n3. Local one-off component last\n\nComponent migration budgets in sprint planning\nEnforced via PR review",
+            status: "governance",
+            risk: null,
+          },
+        ],
+      },
+    };
+
+    const FLOWS = [
+      { from: "figma",  to: "tokens",  label: "REST API / Plugin" },
+      { from: "tokens", to: "rcl",     label: "CSS vars" },
+      { from: "tokens", to: "stories", label: "Token preview" },
+      { from: "rcl",    to: "stories", label: "Components" },
+      { from: "rcl",    to: "tests",   label: "Under test" },
+      { from: "stories",to: "tests",   label: "Story states" },
+      { from: "tests",  to: "ci",      label: "Gates pass" },
+      { from: "ci",     to: "rp",      label: "Package" },
+      { from: "ci",     to: "fd",      label: "Package" },
+      { from: "ci",     to: "pmp",     label: "Package" },
+      { from: "rules",  to: "rp",      label: "" },
+      { from: "rules",  to: "fd",      label: "" },
+      { from: "rules",  to: "pmp",     label: "" },
+    ];
+
+    const PHASES = [
+      {
+        id: 1,
+        label: "Phase 1: Foundation + Vertical Slice",
+        color: "#E8725A",
+        items: ["tokens", "rcl", "stories", "tests", "ci"],
+        desc: "Prove the full pipeline end-to-end with one real component (Page Frame). Token model, Style Dictionary pipeline, –fx- prefix linter, MudBlazor v8 theme, BlazingStory host, bUnit harness.",
+        exit: "One component flows through the entire pipeline and renders correctly in a consuming app.",
+      },
+      {
+        id: 2,
+        label: "Phase 2: Core Components",
+        color: "#3B82C4",
+        items: ["rcl", "stories", "tests", "rp", "fd"],
+        desc: "Buttons, inputs, dialogs, banners. Story coverage for states and a11y. axe-core integration. First consumers in RP and FoxDen. Begin workflow patterns in parallel.",
+        exit: "Both RP and FoxDen consume 3+ shared components in production.",
+      },
+      {
+        id: 3,
+        label: "Phase 3: Workflow Patterns",
+        color: "#22A06B",
+        items: ["rcl", "stories", "tests", "rp", "fd"],
+        desc: "Wizard shell, grid shell, page frame, upload panels, confirmation flows. Playwright visual regression baselines established.",
+        exit: "Workflow patterns cover 7 high-value candidates. Sprint velocity measurably improves.",
+      },
+      {
+        id: 4,
+        label: "Phase 4: App Convergence",
+        color: "#8B6FC0",
+        items: ["rcl", "rp", "fd", "pmp", "rules"],
+        desc: "Migrate duplicated components. Onboard Admin/PMP WASM. Move to NuGet packages if needed. Explicit sprint budgets for migration.",
+        exit: "No duplicated implementations. Admin/PMP consuming shared library without server-side assumptions.",
+      },
+    ];
+
+    const RISKS = [
+      { severity: "high",   label: "BlazingStory abandonment",          mitigation: "Portable story format; fallback ASP.NET Core app; quarterly health check" },
+      { severity: "high",   label: "MudBlazor v8→v9+ breaking changes", mitigation: "Wrapper layer absorbs changes; pin minor version; test on upgrade branch" },
+      { severity: "medium", label: "Token naming drift",                 mitigation: "–fx- prefix enforced in CI linter; Style Dictionary as single transform source" },
+      { severity: "medium", label: "RCL over-centralization",            mitigation: "Adoption rules enforced in PR review; app adapters absorb app-specific needs" },
+      { severity: "medium", label: "WASM consumer incompatibility",      mitigation: "Render-mode-agnostic design; interface-only DI; integration tests per host" },
+      { severity: "low",    label: "Figma export instability",           mitigation: "REST API + plugin fallback; don't depend on native export alone" },
+    ];
+
+    const STATUS_BADGES = {
+      stable:     { label: "Stable",     bg: "#22A06B", fg: "#fff" },
+      core:       { label: "Core",       bg: "#3B82C4", fg: "#fff" },
+      new:        { label: "New",        bg: "#E8725A", fg: "#fff" },
+      risk:       { label: "At Risk",    bg: "#CF3B21", fg: "#fff" },
+      planned:    { label: "Planned",    bg: "#8B6FC0", fg: "#fff" },
+      governance: { label: "Policy",     bg: "#5E6C84", fg: "#fff" },
+    };
+
+    function StatusBadge({ status }) {
+      const s = STATUS_BADGES[status];
+      if (!s) return null;
+      return (
+        <span style={{
+          display: "inline-block",
+          fontSize: 9,
+          fontWeight: 700,
+          letterSpacing: "0.05em",
+          textTransform: "uppercase",
+          padding: "2px 7px",
+          borderRadius: 3,
+          backgroundColor: s.bg,
+          color: s.fg,
+          lineHeight: "14px",
+        }}>
+          {s.label}
+        </span>
+      );
+    }
+
+    function RiskDot({ level }) {
+      const colors = { high: "#CF3B21", medium: "#E8725A", low: "#F5CD47" };
+      return (
+        <span style={{
+          display: "inline-block",
+          width: 8,
+          height: 8,
+          borderRadius: "50%",
+          backgroundColor: colors[level] || "#999",
+          marginRight: 5,
+          flexShrink: 0,
+        }} />
+      );
+    }
+
+    function Card({ item, isActive, isPhaseHighlighted, onClick, layerColor }) {
+      const hasRisk = !!item.risk;
+      const riskColor = item.risk === "high" ? "#CF3B21" : item.risk === "medium" ? "#E8725A" : "#F5CD47";
+      return (
+        <button
+          onClick={() => onClick(item.id)}
+          style={{
+            all: "unset",
+            cursor: "pointer",
+            display: "flex",
+            flexDirection: "column",
+            gap: 6,
+            padding: "14px 16px",
+            borderRadius: 8,
+            border: isActive
+              ? `2px solid ${layerColor}`
+              : isPhaseHighlighted
+              ? `2px solid ${layerColor}55`
+              : "1px solid #2a2f3a",
+            backgroundColor: isActive
+              ? `${layerColor}12`
+              : isPhaseHighlighted
+              ? `${layerColor}08`
+              : "#1a1e28",
+            transition: "all 0.2s ease",
+            minWidth: 155,
+            maxWidth: 200,
+            boxShadow: isActive ? `0 4px 20px ${layerColor}22` : "0 1px 3px rgba(0,0,0,0.3)",
+            position: "relative",
+            overflow: "hidden",
+          }}
+        >
+          {hasRisk && (
+            <div style={{
+              position: "absolute",
+              top: 0,
+              right: 0,
+              width: 0,
+              height: 0,
+              borderLeft: "16px solid transparent",
+              borderTop: `16px solid ${riskColor}`,
+            }} />
+          )}
+          <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+            <span style={{
+              fontSize: 13,
+              fontWeight: 700,
+              color: "#e8eaed",
+              letterSpacing: "-0.01em",
+              fontFamily: "'DM Sans', sans-serif",
+            }}>
+              {item.label}
+            </span>
+          </div>
+          <StatusBadge status={item.status} />
+        </button>
+      );
+    }
+
+    function DetailPanel({ item, layerColor, onClose }) {
+      if (!item) return null;
+      const lines = item.detail.split("\n");
+      return (
+        <div style={{
+          backgroundColor: "#1a1e28",
+          border: `1px solid ${layerColor}44`,
+          borderRadius: 10,
+          padding: "20px 22px",
+          position: "relative",
+          boxShadow: `0 8px 32px ${layerColor}15`,
+        }}>
+          <button
+            onClick={onClose}
+            style={{
+              all: "unset",
+              cursor: "pointer",
+              position: "absolute",
+              top: 12,
+              right: 14,
+              color: "#6b7280",
+              fontSize: 16,
+              lineHeight: 1,
+            }}
+          >
+            ✕
+          </button>
+          <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 12 }}>
+            <div style={{ width: 4, height: 20, borderRadius: 2, backgroundColor: layerColor }} />
+            <span style={{
+              fontSize: 16,
+              fontWeight: 700,
+              color: "#e8eaed",
+              fontFamily: "'DM Sans', sans-serif",
+            }}>
+              {item.label}
+            </span>
+            <StatusBadge status={item.status} />
+          </div>
+          <div style={{ fontSize: 12.5, color: "#9ca3af", lineHeight: 1.7, fontFamily: "'JetBrains Mono', monospace" }}>
+            {lines.map((line, i) => (
+              <div key={i} style={{ minHeight: line === "" ? 8 : "auto" }}>{line}</div>
+            ))}
+          </div>
+          {item.riskNote && (
+            <div style={{
+              marginTop: 14,
+              padding: "10px 12px",
+              borderRadius: 6,
+              backgroundColor: item.risk === "high" ? "#CF3B2112" : "#E8725A12",
+              border: `1px solid ${item.risk === "high" ? "#CF3B2133" : "#E8725A33"}`,
+              fontSize: 11.5,
+              color: item.risk === "high" ? "#f0836e" : "#f0a88e",
+              lineHeight: 1.6,
+              display: "flex",
+              alignItems: "flex-start",
+              gap: 8,
+            }}>
+              <RiskDot level={item.risk} />
+              <span>{item.riskNote}</span>
+            </div>
+          )}
+        </div>
+      );
+    }
+
+    function ArchitectureViz() {
+      const [selected, setSelected] = useState(null);
+      const [activePhase, setActivePhase] = useState(null);
+      const [view, setView] = useState("architecture");
+      const [animIn, setAnimIn] = useState(false);
+
+      useEffect(() => { setAnimIn(true); }, []);
+
+      const allItems = Object.values(LAYERS).flatMap((l) => l.items);
+      const selectedItem = allItems.find((i) => i.id === selected);
+      const selectedLayerColor = selectedItem
+        ? Object.values(LAYERS).find((l) => l.items.some((i) => i.id === selected))?.color
+        : null;
+      const phaseHighlighted = activePhase
+        ? PHASES.find((p) => p.id === activePhase)?.items || []
+        : [];
+
+      return (
+        <div style={{
+          minHeight: "100vh",
+          backgroundColor: "#0f1117",
+          color: "#e8eaed",
+          fontFamily: "'DM Sans', -apple-system, sans-serif",
+          position: "relative",
+          overflow: "hidden",
+        }}>
+          {/* Grid background */}
+          <div style={{
+            position: "fixed",
+            inset: 0,
+            backgroundImage:
+              "linear-gradient(rgba(255,255,255,0.015) 1px, transparent 1px), linear-gradient(90deg, rgba(255,255,255,0.015) 1px, transparent 1px)",
+            backgroundSize: "48px 48px",
+            pointerEvents: "none",
+          }} />
+
+          <div style={{ maxWidth: 960, margin: "0 auto", padding: "32px 24px", position: "relative" }}>
+
+            {/* Header */}
+            <div style={{
+              opacity: animIn ? 1 : 0,
+              transform: animIn ? "translateY(0)" : "translateY(-12px)",
+              transition: "all 0.6s ease",
+              marginBottom: 28,
+            }}>
+              <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 6 }}>
+                <div style={{
+                  width: 10, height: 10, borderRadius: 2,
+                  backgroundColor: "#E8725A", transform: "rotate(45deg)",
+                }} />
+                <span style={{
+                  fontSize: 10, fontWeight: 700, textTransform: "uppercase",
+                  letterSpacing: "0.12em", color: "#6b7280",
+                }}>
+                  Foxen · Front-End Platform
+                </span>
+              </div>
+              <h1 style={{
+                fontSize: 28, fontWeight: 700, letterSpacing: "-0.03em",
+                margin: 0, lineHeight: 1.2,
+                background: "linear-gradient(135deg, #e8eaed 0%, #9ca3af 100%)",
+                WebkitBackgroundClip: "text",
+                WebkitTextFillColor: "transparent",
+              }}>
+                Delivery System Architecture
+              </h1>
+              <p style={{ fontSize: 13, color: "#6b7280", marginTop: 6, lineHeight: 1.5 }}>
+                Figma → Style Dictionary → Foxen.Ui (MudBlazor v8) → BlazingStory → RP / FoxDen / Admin
+              </p>
+            </div>
+
+            {/* Nav tabs */}
+            <div style={{
+              display: "flex", gap: 2, marginBottom: 28,
+              borderBottom: "1px solid #2a2f3a", paddingBottom: 0,
+            }}>
+              {[
+                { id: "architecture", label: "Architecture" },
+                { id: "phases",       label: "Rollout Phases" },
+                { id: "risks",        label: "Risk Register" },
+              ].map((tab) => (
+                <button
+                  key={tab.id}
+                  onClick={() => { setView(tab.id); setSelected(null); setActivePhase(null); }}
+                  style={{
+                    all: "unset",
+                    cursor: "pointer",
+                    padding: "8px 16px",
+                    fontSize: 12,
+                    fontWeight: 600,
+                    letterSpacing: "0.02em",
+                    color: view === tab.id ? "#e8eaed" : "#6b7280",
+                    borderBottom: view === tab.id ? "2px solid #E8725A" : "2px solid transparent",
+                    marginBottom: -1,
+                    transition: "all 0.2s ease",
+                  }}
+                >
+                  {tab.label}
+                </button>
+              ))}
+            </div>
+
+            {/* ── ARCHITECTURE VIEW ── */}
+            {view === "architecture" && (
+              <div style={{ display: "flex", flexDirection: "column", gap: 20 }}>
+                {Object.values(LAYERS).map((layer, li) => (
+                  <div
+                    key={layer.id}
+                    style={{
+                      opacity: animIn ? 1 : 0,
+                      transform: animIn ? "translateY(0)" : "translateY(16px)",
+                      transition: `all 0.5s ease ${li * 0.1}s`,
+                    }}
+                  >
+                    <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 10 }}>
+                      <div style={{ width: 14, height: 2, borderRadius: 1, backgroundColor: layer.color }} />
+                      <span style={{
+                        fontSize: 11, fontWeight: 700, textTransform: "uppercase",
+                        letterSpacing: "0.08em", color: layer.color,
+                      }}>
+                        {layer.label}
+                      </span>
+                    </div>
+                    <div style={{
+                      display: "flex", gap: 12, flexWrap: "wrap",
+                      padding: "14px 16px", borderRadius: 10,
+                      backgroundColor: layer.bgLight,
+                      border: `1px solid ${layer.color}18`,
+                    }}>
+                      {layer.items.map((item) => (
+                        <Card
+                          key={item.id}
+                          item={item}
+                          isActive={selected === item.id}
+                          isPhaseHighlighted={phaseHighlighted.includes(item.id)}
+                          onClick={setSelected}
+                          layerColor={layer.color}
+                        />
+                      ))}
+                    </div>
+                  </div>
+                ))}
+
+                {/* Data flow */}
+                <div style={{
+                  marginTop: 8, padding: "16px 18px", borderRadius: 10,
+                  backgroundColor: "#13161e", border: "1px solid #2a2f3a",
+                }}>
+                  <div style={{
+                    fontSize: 10, fontWeight: 700, textTransform: "uppercase",
+                    letterSpacing: "0.08em", color: "#6b7280", marginBottom: 12,
+                  }}>
+                    Data Flow
+                  </div>
+                  <div style={{
+                    display: "flex", flexWrap: "wrap", gap: "6px 16px",
+                    fontSize: 11, color: "#9ca3af", fontFamily: "'JetBrains Mono', monospace",
+                  }}>
+                    {FLOWS.filter((f) => f.label).map((flow, i) => {
+                      const fromItem = allItems.find((it) => it.id === flow.from);
+                      const toItem   = allItems.find((it) => it.id === flow.to);
+                      return (
+                        <span key={i} style={{ display: "inline-flex", alignItems: "center", gap: 4 }}>
+                          <span style={{ color: "#e8eaed", fontWeight: 500 }}>{fromItem?.label}</span>
+                          <span style={{ color: "#4a5568" }}>→</span>
+                          <span style={{ color: "#e8eaed", fontWeight: 500 }}>{toItem?.label}</span>
+                          <span style={{ color: "#4a5568", fontSize: 10 }}>({flow.label})</span>
+                        </span>
+                      );
+                    })}
+                  </div>
+                </div>
+
+                {/* Detail panel */}
+                {selectedItem && (
+                  <DetailPanel
+                    item={selectedItem}
+                    layerColor={selectedLayerColor}
+                    onClose={() => setSelected(null)}
+                  />
+                )}
+              </div>
+            )}
+
+            {/* ── PHASES VIEW ── */}
+            {view === "phases" && (
+              <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
+                {PHASES.map((phase, pi) => {
+                  const isActive = activePhase === phase.id;
+                  return (
+                    <button
+                      key={phase.id}
+                      onClick={() => setActivePhase(isActive ? null : phase.id)}
+                      style={{
+                        all: "unset",
+                        cursor: "pointer",
+                        display: "block",
+                        padding: "18px 20px",
+                        borderRadius: 10,
+                        border: isActive ? `2px solid ${phase.color}` : "1px solid #2a2f3a",
+                        backgroundColor: isActive ? `${phase.color}0a` : "#1a1e28",
+                        transition: "all 0.25s ease",
+                        opacity: animIn ? 1 : 0,
+                        transform: animIn ? "translateY(0)" : "translateY(12px)",
+                        transitionDelay: `${pi * 0.08}s`,
+                      }}
+                    >
+                      <div style={{ display: "flex", alignItems: "center", gap: 12, marginBottom: isActive ? 14 : 0 }}>
+                        <div style={{
+                          width: 28, height: 28, borderRadius: 6,
+                          backgroundColor: phase.color,
+                          display: "flex", alignItems: "center", justifyContent: "center",
+                          fontSize: 13, fontWeight: 700, color: "#fff", flexShrink: 0,
+                        }}>
+                          {phase.id}
+                        </div>
+                        <span style={{ fontSize: 14, fontWeight: 700, color: "#e8eaed", letterSpacing: "-0.01em" }}>
+                          {phase.label}
+                        </span>
+                        <span style={{
+                          marginLeft: "auto", fontSize: 16, color: "#6b7280",
+                          display: "inline-block",
+                          transform: isActive ? "rotate(180deg)" : "rotate(0)",
+                          transition: "transform 0.2s ease",
+                        }}>
+                          ▾
+                        </span>
+                      </div>
+                      {isActive && (
+                        <div style={{ paddingLeft: 40 }}>
+                          <p style={{ fontSize: 12.5, color: "#9ca3af", lineHeight: 1.7, margin: "0 0 14px 0" }}>
+                            {phase.desc}
+                          </p>
+                          <div style={{ fontSize: 11, color: "#6b7280", marginBottom: 14 }}>
+                            <span style={{
+                              fontWeight: 700, textTransform: "uppercase",
+                              letterSpacing: "0.06em", fontSize: 9, color: phase.color,
+                            }}>
+                              Involved
+                            </span>
+                            <div style={{ display: "flex", flexWrap: "wrap", gap: 6, marginTop: 6 }}>
+                              {phase.items.map((itemId) => {
+                                const item = allItems.find((i) => i.id === itemId);
+                                return (
+                                  <span key={itemId} style={{
+                                    fontSize: 10, fontWeight: 600,
+                                    padding: "3px 8px", borderRadius: 4,
+                                    backgroundColor: `${phase.color}18`,
+                                    color: phase.color,
+                                    fontFamily: "'JetBrains Mono', monospace",
+                                  }}>
+                                    {item?.label || itemId}
+                                  </span>
+                                );
+                              })}
+                            </div>
+                          </div>
+                          <div style={{
+                            padding: "10px 12px", borderRadius: 6,
+                            backgroundColor: "#22A06B12", border: "1px solid #22A06B33",
+                            fontSize: 11.5, color: "#6dd8a0", lineHeight: 1.6,
+                          }}>
+                            <span style={{
+                              fontWeight: 700, fontSize: 9,
+                              textTransform: "uppercase", letterSpacing: "0.06em",
+                            }}>
+                              Exit Criteria:{" "}
+                            </span>
+                            {phase.exit}
+                          </div>
+                        </div>
+                      )}
+                    </button>
+                  );
+                })}
+
+                {/* Phase timeline bar */}
+                <div style={{
+                  marginTop: 12, padding: "16px 18px", borderRadius: 10,
+                  backgroundColor: "#13161e", border: "1px solid #2a2f3a",
+                }}>
+                  <div style={{
+                    fontSize: 10, fontWeight: 700, textTransform: "uppercase",
+                    letterSpacing: "0.08em", color: "#6b7280", marginBottom: 12,
+                  }}>
+                    Timeline
+                  </div>
+                  <div style={{ display: "flex", gap: 3, height: 6, borderRadius: 3, overflow: "hidden" }}>
+                    {PHASES.map((phase) => (
+                      <div
+                        key={phase.id}
+                        onClick={() => setActivePhase(activePhase === phase.id ? null : phase.id)}
+                        style={{
+                          flex: phase.id === 4 ? 3 : 2,
+                          backgroundColor: activePhase === phase.id ? phase.color : `${phase.color}44`,
+                          borderRadius: 2,
+                          transition: "background-color 0.3s ease",
+                          cursor: "pointer",
+                        }}
+                      />
+                    ))}
+                  </div>
+                  <div style={{ display: "flex", gap: 3, marginTop: 6 }}>
+                    {PHASES.map((phase) => (
+                      <div key={phase.id} style={{
+                        flex: phase.id === 4 ? 3 : 2,
+                        fontSize: 9, color: "#6b7280", textAlign: "center",
+                      }}>
+                        P{phase.id}
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              </div>
+            )}
+
+            {/* ── RISKS VIEW ── */}
+            {view === "risks" && (
+              <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+                {RISKS.map((risk, ri) => (
+                  <div key={ri} style={{
+                    padding: "14px 18px", borderRadius: 8,
+                    backgroundColor: "#1a1e28", border: "1px solid #2a2f3a",
+                    opacity: animIn ? 1 : 0,
+                    transform: animIn ? "translateY(0)" : "translateY(8px)",
+                    transition: `all 0.4s ease ${ri * 0.06}s`,
+                  }}>
+                    <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 8 }}>
+                      <RiskDot level={risk.severity} />
+                      <span style={{
+                        fontSize: 9, fontWeight: 700, textTransform: "uppercase",
+                        letterSpacing: "0.06em",
+                        color: risk.severity === "high" ? "#f0836e" : risk.severity === "medium" ? "#f0a88e" : "#e8d44d",
+                        padding: "2px 6px", borderRadius: 3,
+                        backgroundColor:
+                          risk.severity === "high" ? "#CF3B2118" :
+                          risk.severity === "medium" ? "#E8725A18" : "#F5CD4718",
+                      }}>
+                        {risk.severity}
+                      </span>
+                      <span style={{ fontSize: 13, fontWeight: 600, color: "#e8eaed" }}>{risk.label}</span>
+                    </div>
+                    <div style={{ fontSize: 12, color: "#9ca3af", lineHeight: 1.6, paddingLeft: 18 }}>
+                      <span style={{
+                        color: "#6b7280", fontWeight: 600, fontSize: 10,
+                        textTransform: "uppercase", letterSpacing: "0.04em",
+                      }}>
+                        Mitigation:{" "}
+                      </span>
+                      {risk.mitigation}
+                    </div>
+                  </div>
+                ))}
+
+                {/* Risk summary bar */}
+                <div style={{
+                  marginTop: 8, padding: "16px 18px", borderRadius: 10,
+                  backgroundColor: "#13161e", border: "1px solid #2a2f3a",
+                  display: "flex", gap: 24,
+                }}>
+                  {["high", "medium", "low"].map((level) => {
+                    const count = RISKS.filter((r) => r.severity === level).length;
+                    return (
+                      <div key={level} style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                        <RiskDot level={level} />
+                        <span style={{
+                          fontSize: 22, fontWeight: 700, color: "#e8eaed",
+                          fontFamily: "'JetBrains Mono', monospace",
+                        }}>
+                          {count}
+                        </span>
+                        <span style={{ fontSize: 11, color: "#6b7280", textTransform: "capitalize" }}>
+                          {level}
+                        </span>
+                      </div>
+                    );
+                  })}
+                </div>
+              </div>
+            )}
+
+            {/* Footer */}
+            <div style={{
+              marginTop: 36, paddingTop: 16, borderTop: "1px solid #1e222d",
+              display: "flex", justifyContent: "space-between", alignItems: "center",
+              fontSize: 10, color: "#4a5068",
+            }}>
+              <span>MudBlazor v8 · .NET 8+ · Style Dictionary · BlazingStory</span>
+              <span>Updated March 2026</span>
+            </div>
+
+          </div>
+        </div>
+      );
+    }
+
+    const root = ReactDOM.createRoot(document.getElementById("root"));
+    root.render(<ArchitectureViz />);
+  </script>
+</body>
+</html>
