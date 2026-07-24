@@ -7,6 +7,6 @@
     "minify-svg": "svgo icon.svg -p 0 -o icon.min.svg"
   },
   "dependencies": {
-    "svgo": "^3.0.2"
+    "svgo": "^3.3.4"
   }
 }
